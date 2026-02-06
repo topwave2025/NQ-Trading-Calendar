@@ -1,0 +1,39 @@
+name: Daily Trading Calendar Update
+
+# 언제 실행할지 설정
+on:
+  schedule:
+    # 한국 시간 매일 오전 7시 (UTC 22:00) 실행
+    - cron: '0 22 * * *'
+  # 수동으로 실행 버튼도 만들어둠 (테스트용)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 저장소 코드 가져오기
+      uses: actions/checkout@v3
+
+    - name: 파이썬 설정하기
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: 필요한 라이브러리 설치
+      run: |
+        pip install requests beautifulsoup4 yfinance pytz ics
+
+    - name: 파이썬 스크립트 실행
+      run: python main.py
+
+    - name: 변경된 캘린더 저장하고 올리기
+      run: |
+        git config --global user.name "GitHub Action Bot"
+        git config --global user.email "action@github.com"
+        git add trading_calendar.ics
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update trading calendar" && git push)
