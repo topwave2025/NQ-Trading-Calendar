@@ -114,6 +114,12 @@ def fetch_forex_events() -> list:
     print("\n🔍 [1] ForexFactory 경제 지표 수집...")
     scraper = cloudscraper.create_scraper()
 
+    # 월 이름 명시 매칭 (요일 Fri/Thu 등과 혼동 방지, 대소문자 무관)
+    DATE_RE = re.compile(
+        r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{1,2})',
+        re.IGNORECASE
+    )
+
     now = datetime.now()
     months = []
     cur = date(now.year, now.month, 1)
@@ -143,58 +149,41 @@ def fetch_forex_events() -> list:
             cur_date = None
 
             for row in table.find_all('tr'):
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # 날짜 파싱 (2단계)
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                date_found = False
-
-                # Step 1: calendar__date cell (표준 이벤트 행)
-                dc = row.find('td', class_='calendar__date')
-                if dc:
-                    dt_text = dc.get_text(strip=True)
-                    if dt_text:
-                        dm = re.search(r'([A-Z][a-z]{2})\s*(\d{1,2})', dt_text)
-                        if dm:
-                            mn = MONTH_MAP.get(dm.group(1).lower())
-                            dn = int(dm.group(2))
-                            if mn:
-                                yr = page_year
-                                if mn == 12 and page_month == 1:
-                                    yr = page_year - 1
-                                elif mn == 1 and page_month == 12:
-                                    yr = page_year + 1
-                                try:
-                                    cur_date = date(yr, mn, dn)
-                                    date_found = True
-                                except ValueError:
-                                    pass
-
-                # Step 2: date breaker row (calendar__date 없는 날짜 구분 행)
-                # 이벤트 데이터가 없는 행에서만 검사 → 오탐 방지
-                if not date_found and not row.find('td', class_='calendar__event'):
-                    row_text = row.get_text(strip=True)
-                    if row_text:
-                        dm = re.search(r'([A-Z][a-z]{2})\s*(\d{1,2})', row_text)
-                        if dm:
-                            mn = MONTH_MAP.get(dm.group(1).lower())
-                            if mn:
-                                dn = int(dm.group(2))
-                                yr = page_year
-                                if mn == 12 and page_month == 1:
-                                    yr = page_year - 1
-                                elif mn == 1 and page_month == 12:
-                                    yr = page_year + 1
-                                try:
-                                    cur_date = date(yr, mn, dn)
-                                except ValueError:
-                                    pass
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 날짜 추출 (모든 행, 모든 셀)
+                # calendar__event 셀은 제외 (오탐 방지)
+                # cur_date는 앞으로만 이동 (FF는 시간순)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                for cell in row.find_all(['td', 'th']):
+                    if 'calendar__event' in (cell.get('class') or []):
+                        continue
+                    cell_text = cell.get_text(" ", strip=True)
+                    dm = DATE_RE.search(cell_text)
+                    if dm:
+                        mn = MONTH_MAP.get(dm.group(1).lower())
+                        dn = int(dm.group(2))
+                        if mn:
+                            yr = page_year
+                            if mn == 12 and page_month == 1:
+                                yr -= 1
+                            elif mn == 1 and page_month == 12:
+                                yr += 1
+                            try:
+                                candidate = date(yr, mn, dn)
+                                if cur_date is None or candidate >= cur_date:
+                                    if candidate != cur_date:
+                                        print(f"      📅 {candidate}")
+                                    cur_date = candidate
+                                    break
+                            except ValueError:
+                                pass
 
                 if cur_date is None or cur_date < now.date():
                     continue
 
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # 이벤트 파싱 (이하 동일)
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 이벤트 파싱 (이하 전부 동일)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 cc = row.find('td', class_='calendar__currency')
                 ec = row.find('td', class_='calendar__event')
                 tc = row.find('td', class_='calendar__time')
