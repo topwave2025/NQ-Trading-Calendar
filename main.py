@@ -34,7 +34,7 @@ MARKET_PREP_ET = dt_time(8, 30)
 EARNINGS_CANDIDATES = ["AAPL", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "TSLA"]
 EARNINGS_TOP_N = 3
 
-BLACKLIST = ["adp"]
+BLACKLIST = ["adp", "pce"]
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # NQ ESSENTIAL EVENTS
@@ -143,6 +143,12 @@ def fetch_forex_events() -> list:
             cur_date = None
 
             for row in table.find_all('tr'):
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 날짜 파싱 (2단계)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                date_found = False
+
+                # Step 1: calendar__date cell (표준 이벤트 행)
                 dc = row.find('td', class_='calendar__date')
                 if dc:
                     dt_text = dc.get_text(strip=True)
@@ -159,12 +165,36 @@ def fetch_forex_events() -> list:
                                     yr = page_year + 1
                                 try:
                                     cur_date = date(yr, mn, dn)
+                                    date_found = True
+                                except ValueError:
+                                    pass
+
+                # Step 2: date breaker row (calendar__date 없는 날짜 구분 행)
+                # 이벤트 데이터가 없는 행에서만 검사 → 오탐 방지
+                if not date_found and not row.find('td', class_='calendar__event'):
+                    row_text = row.get_text(strip=True)
+                    if row_text:
+                        dm = re.search(r'([A-Z][a-z]{2})\s*(\d{1,2})', row_text)
+                        if dm:
+                            mn = MONTH_MAP.get(dm.group(1).lower())
+                            if mn:
+                                dn = int(dm.group(2))
+                                yr = page_year
+                                if mn == 12 and page_month == 1:
+                                    yr = page_year - 1
+                                elif mn == 1 and page_month == 12:
+                                    yr = page_year + 1
+                                try:
+                                    cur_date = date(yr, mn, dn)
                                 except ValueError:
                                     pass
 
                 if cur_date is None or cur_date < now.date():
                     continue
 
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 이벤트 파싱 (이하 동일)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 cc = row.find('td', class_='calendar__currency')
                 ec = row.find('td', class_='calendar__event')
                 tc = row.find('td', class_='calendar__time')
@@ -189,7 +219,6 @@ def fetch_forex_events() -> list:
                 tc_text = tc.get_text(strip=True) if tc else ""
                 ff_h, ff_m, ff_ok = parse_ff_time(tc_text)
 
-                # ── FF timezone auto-detection ──
                 if ff_tz_offset is None and cfg["time_et"] is not None and ff_ok:
                     ff_tz_offset = (ff_h - cfg["time_et"][0]) % 24
                     if ff_tz_offset == 0:
@@ -197,7 +226,6 @@ def fetch_forex_events() -> list:
                     else:
                         print(f"   🕐 FF timezone: ET+{ff_tz_offset}h")
 
-                # ── ET 날짜 & 시간 결정 ──
                 et_date = cur_date
 
                 if cfg["time_et"] is not None:
@@ -223,12 +251,6 @@ def fetch_forex_events() -> list:
                     else:
                         et_h, et_m = 10, 0
 
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # DEDUP: 월별 (fedchair만 일별)
-                # FF가 CPI m/m과 Core CPI를 이틀에 걸쳐
-                # 표시하는 문제 대응. 같은 group은 월 1회.
-                # 더 늦은 날짜가 나타나면 교체 (더 정확한 경향)
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 if cfg["group"] == "fedchair":
                     dedup_key = (et_date, "fedchair")
                     if dedup_key in events_map:
@@ -241,7 +263,6 @@ def fetch_forex_events() -> list:
                         else:
                             continue
 
-                # ── Datetime 생성 ──
                 try:
                     naive = datetime.combine(et_date, dt_time(et_h, et_m))
                     dt_et  = ET.localize(naive)
