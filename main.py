@@ -1,10 +1,11 @@
 """
-NQ Trading Calendar v2.3
-- FOMC Statement 제거 (Federal Funds Rate와 중복)
-- ff_tz_offset 날짜 보정 (ff_ok=False 대응)
+NQ Trading Calendar v2.4
+- Monthly dedup (CPI 이틀 표시 버그 수정)
+- FOMC Statement 제거
+- ff_tz_offset 날짜 보정
 - ADP blacklist
 - Known Time + FF timezone auto-detection
-- Dual alarms: 30min before + 8:30 AM ET market prep
+- Dual alarms: 30min before + 8:30 AM ET
 - Fed Chair future-proof
 """
 
@@ -39,7 +40,6 @@ BLACKLIST = ["adp"]
 # NQ ESSENTIAL EVENTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EVENTS_DEF = [
-    # ── Tier 1 ──
     {"match": ["federal funds rate"],
      "group": "fomc", "display": "FOMC Rate Decision",
      "emoji": "🔴", "time_et": (14, 0), "tier": 1},
@@ -65,7 +65,6 @@ EVENTS_DEF = [
      "group": "fedchair", "display": "Fed Chair Speaks",
      "emoji": "🗣️", "time_et": None, "tier": 1},
 
-    # ── Tier 2 ──
     {"match": ["ism services pmi"],
      "group": "ism_svc", "display": "ISM Services PMI",
      "emoji": "⚡", "time_et": (10, 0), "tier": 2},
@@ -94,7 +93,6 @@ def match_event(name_lower: str):
 
 
 def parse_ff_time(time_str: str):
-    """Returns (hour, minute, success)."""
     s = time_str.strip().lower()
     if not s or 'day' in s or 'tentative' in s:
         return (10, 0, False)
@@ -145,7 +143,6 @@ def fetch_forex_events() -> list:
             cur_date = None
 
             for row in table.find_all('tr'):
-                # ── 날짜 파싱 ──
                 dc = row.find('td', class_='calendar__date')
                 if dc:
                     dt_text = dc.get_text(strip=True)
@@ -192,7 +189,7 @@ def fetch_forex_events() -> list:
                 tc_text = tc.get_text(strip=True) if tc else ""
                 ff_h, ff_m, ff_ok = parse_ff_time(tc_text)
 
-                # ── FF timezone auto-detection (1회) ──
+                # ── FF timezone auto-detection ──
                 if ff_tz_offset is None and cfg["time_et"] is not None and ff_ok:
                     ff_tz_offset = (ff_h - cfg["time_et"][0]) % 24
                     if ff_tz_offset == 0:
@@ -204,21 +201,15 @@ def fetch_forex_events() -> list:
                 et_date = cur_date
 
                 if cfg["time_et"] is not None:
-                    # Known Time 이벤트
                     et_h, et_m = cfg["time_et"]
-
                     if ff_ok:
-                        # FF 시간 파싱 성공 → 직접 비교로 날짜 보정
                         diff = ff_h - et_h
                         if diff < -6:
                             et_date = cur_date - timedelta(days=1)
                     elif ff_tz_offset is not None:
-                        # FF 시간 빈칸 (같은 시간대 후속 이벤트)
-                        # → 감지된 offset으로 날짜 보정
                         if cfg["time_et"][0] + ff_tz_offset >= 24:
                             et_date = cur_date - timedelta(days=1)
                 else:
-                    # Variable Time (Fed Chair Speaks)
                     tz_off = ff_tz_offset or 0
                     if ff_ok and tz_off > 0:
                         raw_h = ff_h - tz_off
@@ -232,10 +223,23 @@ def fetch_forex_events() -> list:
                     else:
                         et_h, et_m = 10, 0
 
-                # ── Dedup (ET 날짜 기준) ──
-                key = (et_date, cfg["group"])
-                if key in events_map:
-                    continue
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # DEDUP: 월별 (fedchair만 일별)
+                # FF가 CPI m/m과 Core CPI를 이틀에 걸쳐
+                # 표시하는 문제 대응. 같은 group은 월 1회.
+                # 더 늦은 날짜가 나타나면 교체 (더 정확한 경향)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                if cfg["group"] == "fedchair":
+                    dedup_key = (et_date, "fedchair")
+                    if dedup_key in events_map:
+                        continue
+                else:
+                    dedup_key = (et_date.year, et_date.month, cfg["group"])
+                    if dedup_key in events_map:
+                        if et_date > events_map[dedup_key]["_et_date"]:
+                            del events_map[dedup_key]
+                        else:
+                            continue
 
                 # ── Datetime 생성 ──
                 try:
@@ -243,7 +247,8 @@ def fetch_forex_events() -> list:
                     dt_et  = ET.localize(naive)
                     dt_hkt = dt_et.astimezone(HKT)
 
-                    events_map[key] = {
+                    events_map[dedup_key] = {
+                        "_et_date": et_date,
                         "name": f"{cfg['emoji']} {cfg['display']}",
                         "begin_hkt": dt_hkt,
                         "begin_et":  dt_et,
@@ -370,10 +375,8 @@ def generate_ics(events: list):
         e.duration = timedelta(minutes=30)
         e.description = evt["desc"]
 
-        # 알람 1: 이벤트 30분 전
         e.alarms.append(DisplayAlarm(trigger=timedelta(minutes=-30)))
 
-        # 알람 2: 당일 8:30 AM ET
         prep_et  = ET.localize(
             datetime.combine(evt["begin_et"].date(), MARKET_PREP_ET)
         )
@@ -401,7 +404,6 @@ def main():
 
     all_events = sorted(forex + earnings, key=lambda x: x["begin_hkt"])
 
-    # ── 이벤트 테이블 ──
     print("\n" + "=" * 110)
     print(f"📅 NQ TRADING CALENDAR — {len(all_events)} events")
     print("=" * 110)
@@ -422,10 +424,8 @@ def main():
 
     print("=" * 110)
 
-    # ── ICS 생성 ──
     generate_ics(all_events)
 
-    # ── 알람 검증 (첫 FOMC) ──
     fomc = [e for e in all_events if 'FOMC Rate' in e['name']]
     if fomc:
         fe = fomc[0]
@@ -438,10 +438,8 @@ def main():
         print(f"   알람2 (장준비): {prep.strftime('%m/%d %H:%M HKT')}  (8:30AM ET)")
         print(f"   알람1 (30분전): {a30.strftime('%m/%d %H:%M HKT')}")
 
-    print("\n💡 알람 요약:")
-    print("   1️⃣  이벤트 30분 전")
-    print("   2️⃣  당일 8:30 AM ET (CPI/NFP는 동시라 30분 알람만)")
-    print("\n⚠️  iPhone: 설정 → 캘린더 → 구독 캘린더 → '알림 제거' OFF 확인!")
+    print("\n💡 알람: 30분 전 + 8:30AM ET (CPI/NFP는 동시라 30분만)")
+    print("⚠️  iPhone: 설정 → 캘린더 → 구독 캘린더 → '알림 제거' OFF")
 
 
 if __name__ == "__main__":
