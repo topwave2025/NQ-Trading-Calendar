@@ -286,7 +286,7 @@ def fetch_forex_events() -> list:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 2. BIG TECH EARNINGS
+# 2. BIG TECH EARNINGS (날짜 수정)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def get_top_tickers(n=EARNINGS_TOP_N) -> list:
     print(f"🔍 [2] 시가총액 Top {n}...")
@@ -341,14 +341,27 @@ def fetch_earnings(tickers: list) -> list:
                 print(f"   ⚠️ {sym}: 발표일 없음")
                 continue
 
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 날짜 추출 (수정됨)
+            # yfinance 실적일 = 달력 날짜.
+            # 자정 데이터를 UTC→ET 변환하면 -1일 버그 발생.
+            # → 자정이면 timezone 변환 없이 날짜만 추출.
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             if isinstance(earn_date, pd.Timestamp):
                 earn_date = earn_date.to_pydatetime()
-            if isinstance(earn_date, date) and not isinstance(earn_date, datetime):
-                earn_date = datetime.combine(earn_date, dt_time(0, 0))
-            if earn_date.tzinfo is None:
-                earn_date = pytz.utc.localize(earn_date)
 
-            d = earn_date.astimezone(ET).date()
+            if isinstance(earn_date, date) and not isinstance(earn_date, datetime):
+                # date 객체 → 그대로 사용
+                d = earn_date
+            elif earn_date.hour == 0 and earn_date.minute == 0:
+                # 자정 = 달력 날짜 placeholder → 날짜만 추출
+                d = earn_date.date()
+            else:
+                # 구체적 시간 있음 → ET 변환 후 날짜 추출
+                if earn_date.tzinfo is None:
+                    earn_date = pytz.utc.localize(earn_date)
+                d = earn_date.astimezone(ET).date()
+
             dt_et  = ET.localize(datetime.combine(d, dt_time(9, 30)))
             dt_hkt = dt_et.astimezone(HKT)
 
@@ -358,6 +371,7 @@ def fetch_earnings(tickers: list) -> list:
                 "begin_et":  dt_et,
                 "tier": 1,
                 "ff_name": f"{sym} Earnings",
+                "is_earnings": True,
                 "desc": (
                     f"💰 {sym} Earnings\n"
                     f"⏰ ET: {dt_et.strftime('%Y-%m-%d %I:%M %p')}\n"
@@ -373,7 +387,7 @@ def fetch_earnings(tickers: list) -> list:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 3. ICS 생성
+# 3. ICS 생성 (Earnings 알람 수정)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def generate_ics(events: list):
     cal = Calendar()
@@ -385,8 +399,11 @@ def generate_ics(events: list):
         e.duration = timedelta(minutes=30)
         e.description = evt["desc"]
 
-        e.alarms.append(DisplayAlarm(trigger=timedelta(minutes=-30)))
+        # 경제 지표: 30분 전 알람 (Earnings는 스킵)
+        if not evt.get("is_earnings"):
+            e.alarms.append(DisplayAlarm(trigger=timedelta(minutes=-30)))
 
+        # 장준비 알람 (8:30 AM ET) — 모든 이벤트 공통
         prep_et  = ET.localize(
             datetime.combine(evt["begin_et"].date(), MARKET_PREP_ET)
         )
